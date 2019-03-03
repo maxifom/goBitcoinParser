@@ -9,13 +9,12 @@ import (
 	"log"
 	"os"
 	"runtime"
-	"sort"
 	"time"
 )
 
 type Header struct {
 	Version           uint32
-	PreviousBlockHash []byte
+	PreviousBlockHash [32]byte
 	MerkleRoot        []byte
 	Timestamp         uint32
 	Bits              uint32
@@ -48,20 +47,24 @@ type Transaction struct {
 }
 
 type Block struct {
-	Hash               []byte
+	Hash               [32]byte
 	Size               uint32
 	Header             Header
 	TransactionCounter uint64
 	Transactions       []Transaction
+	Next               *Block
 }
 
 func PrintMemUsage() {
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
 	// For info on each, see: https://golang.org/pkg/runtime/#MemStats
-	fmt.Printf("Alloc = %v MiB", bToMb(m.Alloc))
-	fmt.Printf("\tTotalAlloc = %v MiB", bToMb(m.TotalAlloc))
-	fmt.Printf("\tSys = %v MiB\n", bToMb(m.Sys))
+	fmt.Printf("Alloc = %v MiB\n", bToMb(m.Alloc))
+	fmt.Printf("TotalAlloc = %v MiB\n", bToMb(m.TotalAlloc))
+	fmt.Printf("Sys = %v MiB\n", bToMb(m.Sys))
+	fmt.Printf("Frees = %v\n", m.Frees)
+	fmt.Printf("Mallocs = %v\n", m.Mallocs)
+	fmt.Printf("HeapAlloc = %vMiB\n", bToMb(m.HeapAlloc))
 }
 
 func bToMb(b uint64) uint64 {
@@ -69,6 +72,7 @@ func bToMb(b uint64) uint64 {
 }
 
 func main() {
+	programStart := time.Now()
 	logFile, _ := os.OpenFile("blocks.txt", os.O_RDWR|os.O_CREATE, 0666)
 	defer logFile.Close()
 	log.SetOutput(logFile)
@@ -88,100 +92,68 @@ func main() {
 	fmt.Println(speed*1e9/1024/1024, "MB/s")
 	magicBytes := blocks[0:4]
 	split := bytes.Split(blocks, magicBytes)
-	//blocksToSave := make([]Block, len(split)-1)
-	var blocksToSave []Block
-	for _, block := range split[1:] {
-		var b Block
-		blockHash := doubleSHA256(block[4:84])
-		b.Hash = SwapOrder(blockHash[:])
-		size := block[0:4]
-		b.Size = u32(size)
-		version := block[4:8]
-		b.Header.Version = u32(version)
-		b.Header.PreviousBlockHash = SwapOrder(block[8:40])
-		b.Header.MerkleRoot = SwapOrder(block[40:72])
-		timestamp := u32(block[72:76])
-		b.Header.Timestamp = timestamp
-		bits := block[76:80]
-		b.Header.Bits = u32(bits)
-		nonce := block[80:84]
-		b.Header.Nonce = u32(nonce)
-		txCount, n := DecodeVarint(block[84:93])
-		b.TransactionCounter = txCount
-		var nextByte uint64
-		//b.Transactions = make([]Transaction, txCount)
-		nextByte = uint64(84 + n)
-		var q uint64
-		for q = 0; q < txCount; q++ {
-			var tx Transaction
+	blocksToSave := make([]Block, len(split)-1)
+	var nextByte uint64
+	var q uint64
+	var _input uint64
+	var _output uint64
+	var n uint64
+	prevBlockMap := map[[32]byte]int{}
+	var reader *bytes.Reader
+	var buf32 [32]byte
+	for _i, block := range split[1:] {
+		reader = bytes.NewReader(block)
+		blocksToSave[_i].Hash = SwapOrder32(doubleSHA256(block[4:84]))
+		blocksToSave[_i].Size = u32(block[0:4])
+		blocksToSave[_i].Header.Version = u32(block[4:8])
+		_, _ = reader.ReadAt(buf32[:], 8)
+		blocksToSave[_i].Header.PreviousBlockHash = SwapOrder32(buf32)
+		prevBlockMap[blocksToSave[_i].Header.PreviousBlockHash] = _i
+		blocksToSave[_i].Header.MerkleRoot = SwapOrder(block[40:72])
+		blocksToSave[_i].Header.Timestamp = u32(block[72:76])
+		blocksToSave[_i].Header.Bits = u32(SwapOrder(block[76:80]))
+		blocksToSave[_i].Header.Nonce = u32(block[80:84])
+		blocksToSave[_i].TransactionCounter, n = DecodeVarint(block[84:93])
+		nextByte = 84 + n
+		blocksToSave[_i].Transactions = make([]Transaction, blocksToSave[_i].TransactionCounter)
+		for q = 0; q < blocksToSave[_i].TransactionCounter; q++ {
 			txStart := nextByte
-			tx.Version = u32(block[nextByte : nextByte+4])
+			blocksToSave[_i].Transactions[q].Version = u32(block[nextByte : nextByte+4])
 			nextByte += 4
-			inputCounter, n := DecodeVarint(block[nextByte : nextByte+9])
-			tx.InputCounter = inputCounter
-			//tx.Inputs = make([]Input, tx.InputCounter)
-			nextByte += uint64(n)
-			var _input uint64
-			for _input = 0; _input < inputCounter; _input++ {
-				var input Input
-				input.PreviousTransactionHash = block[nextByte : nextByte+32]
+			blocksToSave[_i].Transactions[q].InputCounter, n = DecodeVarint(block[nextByte : nextByte+9])
+			nextByte += n
+			blocksToSave[_i].Transactions[q].Inputs = make([]Input, blocksToSave[_i].Transactions[q].InputCounter)
+			for _input = 0; _input < blocksToSave[_i].Transactions[q].InputCounter; _input++ {
+				blocksToSave[_i].Transactions[q].Inputs[_input].PreviousTransactionHash = block[nextByte : nextByte+32]
 				nextByte += 32
-				input.PreviousTransactionOutIndex = u32(block[nextByte : nextByte+4])
+				blocksToSave[_i].Transactions[q].Inputs[_input].PreviousTransactionOutIndex = u32(block[nextByte : nextByte+4])
 				nextByte += 4
-				inputScriptLength, n := DecodeVarint(block[nextByte : nextByte+9])
-				input.ScriptLength = inputScriptLength
-				nextByte += uint64(n)
-				input.Script = block[nextByte : nextByte+inputScriptLength]
-				nextByte += inputScriptLength
-				input.SequenceNo = block[nextByte : nextByte+4]
+				blocksToSave[_i].Transactions[q].Inputs[_input].ScriptLength, n = DecodeVarint(block[nextByte : nextByte+9])
+				nextByte += n
+				blocksToSave[_i].Transactions[q].Inputs[_input].Script = block[nextByte : nextByte+blocksToSave[_i].Transactions[q].Inputs[_input].ScriptLength]
+				nextByte += blocksToSave[_i].Transactions[q].Inputs[_input].ScriptLength
+				blocksToSave[_i].Transactions[q].Inputs[_input].SequenceNo = block[nextByte : nextByte+4]
 				nextByte += 4
-				tx.Inputs = append(tx.Inputs, input)
 			}
-			outputCounter, n := DecodeVarint(block[nextByte : nextByte+9])
-			tx.OutputCounter = outputCounter
-			//tx.Outputs = make([]Output, tx.OutputCounter)
+			blocksToSave[_i].Transactions[q].OutputCounter, n = DecodeVarint(block[nextByte : nextByte+9])
 			nextByte += uint64(n)
-			var _output uint64
-			for _output = 0; _output < outputCounter; _output++ {
-				var output Output
-				output.Value = u64(block[nextByte : nextByte+8])
+			blocksToSave[_i].Transactions[q].Outputs = make([]Output, blocksToSave[_i].Transactions[q].OutputCounter)
+			for _output = 0; _output < blocksToSave[_i].Transactions[q].OutputCounter; _output++ {
+				blocksToSave[_i].Transactions[q].Outputs[_output].Value = u64(block[nextByte : nextByte+8])
 				nextByte += 8
-				outputScriptLength, n := DecodeVarint(block[nextByte : nextByte+9])
-				output.ScriptLength = outputScriptLength
-				nextByte += uint64(n)
-				output.Script = block[nextByte : nextByte+outputScriptLength]
-				nextByte += outputScriptLength
-				tx.Outputs = append(tx.Outputs, output)
+				blocksToSave[_i].Transactions[q].Outputs[_output].ScriptLength, n = DecodeVarint(block[nextByte : nextByte+9])
+				nextByte += n
+				blocksToSave[_i].Transactions[q].Outputs[_output].Script = block[nextByte : nextByte+blocksToSave[_i].Transactions[q].Outputs[_output].ScriptLength]
+				nextByte += blocksToSave[_i].Transactions[q].Outputs[_output].ScriptLength
 			}
-			tx.LockTime = u32(block[nextByte : nextByte+4])
+			blocksToSave[_i].Transactions[q].LockTime = u32(block[nextByte : nextByte+4])
 			nextByte += 4
 			txHash := doubleSHA256(block[txStart:nextByte])
-			tx.Hash = SwapOrder(txHash[:])
-			b.Transactions = append(b.Transactions, tx)
+			blocksToSave[_i].Transactions[q].Hash = SwapOrder(txHash[:])
 		}
-		blocksToSave = append(blocksToSave, b)
-	}
-
-	sort.Slice(blocksToSave, func(i, j int) bool {
-		if blocksToSave[i].Header.Timestamp == blocksToSave[j].Header.Timestamp {
-			if bytes.EqualFold(blocksToSave[i].Header.PreviousBlockHash, blocksToSave[j].Hash) {
-				return false
-			} else if bytes.EqualFold(blocksToSave[j].Header.PreviousBlockHash, blocksToSave[i].Hash) {
-				return true
-			} else {
-				fmt.Println("Time equal and no prev block hash found")
-				fmt.Printf("%x != %x \n", blocksToSave[j].Header.PreviousBlockHash, blocksToSave[i].Hash)
-				fmt.Printf("%x != %x \n", blocksToSave[i].Header.PreviousBlockHash, blocksToSave[j].Hash)
-				fmt.Printf("Time: %d,%d\n", blocksToSave[i].Header.Timestamp, blocksToSave[j].Header.Timestamp)
-			}
-		}
-		return blocksToSave[i].Header.Timestamp < blocksToSave[j].Header.Timestamp
-	})
-
-	for _, b := range blocksToSave {
-		b.Print()
 	}
 	PrintMemUsage()
+	fmt.Printf("Program took %f s\n", time.Since(programStart).Seconds())
 }
 
 func doubleSHA256(b []byte) [32]byte {
@@ -196,10 +168,7 @@ func u64(buf []byte) uint64 {
 	return binary.LittleEndian.Uint64(buf)
 }
 
-func u16(buf []byte) uint16 {
-	return binary.LittleEndian.Uint16(buf)
-}
-func DecodeVarint(buf []byte) (x uint64, n int) {
+func DecodeVarint(buf []byte) (x uint64, n uint64) {
 	b := []byte{0}
 	reader := bytes.NewReader(buf)
 	_, err := reader.Read(b)
@@ -227,7 +196,7 @@ func DecodeVarint(buf []byte) (x uint64, n int) {
 		if err != nil {
 			return
 		}
-		return uint64(dw), 9
+		return dw, 9
 	default:
 		return uint64(b[0]), 1
 	}
@@ -240,6 +209,16 @@ func SwapOrder(arr []byte) []byte {
 		temp = arr[i]
 		arr[i] = arr[length-i-1]
 		arr[length-i-1] = temp
+	}
+	return arr
+}
+
+func SwapOrder32(arr [32]byte) [32]byte {
+	var temp byte
+	for i := 0; i < 16; i++ {
+		temp = arr[i]
+		arr[i] = arr[31-i]
+		arr[31-i] = temp
 	}
 	return arr
 }
