@@ -7,7 +7,7 @@ TODO:
 1. Input/Output Script decoding
 2. Insert into db / save in CSV format
 3. Sort Blocks according to Previous Block Hash
-4. Decrease Memory Usage (Currently 1138 Megs total and 408 megs Allocation for 128 Meg dat file)
+4. Decrease Memory Usage (Currently ~400 Megs total allocation for 128 Meg dat file)
 5. Add SegWit Support
 6. Make parser parse full blocks folder
 7. Make parser multithreaded
